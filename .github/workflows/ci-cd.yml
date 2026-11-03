@@ -1,0 +1,111 @@
+# CI/CD: TEST → BUILD & PUSH image → DEPLOY to EC2. Each stage runs only if the previous one passed.
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]        # every push to main runs the full pipeline
+  pull_request:
+    branches: [main]        # pull requests run the TESTS only (no deploy)
+  workflow_dispatch:        # adds a manual "Run workflow" button
+
+# Permissions of the automatic GITHUB_TOKEN.
+permissions:
+  contents: read            # read the code
+  packages: write           # push images to GitHub Container Registry
+
+# If you push twice quickly, cancel the older run.
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------- STAGE 1: TEST ----------------
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app        # run commands inside app/
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -v
+
+  # ---------------- STAGE 2: BUILD & PUSH ----------------
+  build:
+    needs: test                                   # only if tests passed
+    if: github.event_name != 'pull_request'       # don't publish images from PRs
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.names.outputs.image }}     # passed to the deploy job
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      # Image names must be lowercase. Tag = first 7 characters of the commit ID.
+      - name: Work out image names
+        id: names
+        run: |
+          REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "image=${REPO}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "latest=${REPO}:latest" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # Log in to GHCR with the automatic token (nothing to set up).
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build from app/Dockerfile and push 2 tags: the commit ID and 'latest'.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.names.outputs.version }}
+          tags: |
+            ${{ steps.names.outputs.image }}
+            ${{ steps.names.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------- STAGE 3: DEPLOY ----------------
+  deploy:
+    needs: build                                  # only if the image was pushed
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}           # server's public IP
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}         # private deploy key
+          script: |
+            set -e
+            # The pipeline keeps its own copy of the repo in ~/prod (separate from your work folder).
+            if [ ! -d ~/prod/docker-webapp ]; then
+              git clone https://github.com/${{ github.repository }}.git ~/prod/docker-webapp
+            fi
+            cd ~/prod/docker-webapp
+            # Make the files exactly match GitHub's main branch.
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            # Deploy the image that was just built.
+            bash scripts/deploy.sh ${{ needs.build.outputs.image }}

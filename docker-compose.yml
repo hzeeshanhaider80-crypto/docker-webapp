@@ -1,0 +1,63 @@
+# Fixed project name, so every run on this server manages the SAME set of containers.
+name: docker-webapp
+
+services:
+  # ---------- 1) The Flask web app ----------
+  web:
+    # Which image to run. The pipeline sets WEB_IMAGE (e.g. ghcr.io/you/docker-webapp:abc1234).
+    # When testing by hand it's unset, so the local image "docker-webapp:local" is used.
+    image: ${WEB_IMAGE:-docker-webapp:local}
+    # How to build the image locally (from app/Dockerfile).
+    build: ./app
+    # Restart automatically after a crash or a server reboot.
+    restart: unless-stopped
+    # Tell the app where Redis is (the service name below).
+    environment:
+      REDIS_HOST: redis
+    # Start only after Redis reports healthy.
+    depends_on:
+      redis:
+        condition: service_healthy
+    # NO 'ports:' here, so the app is NOT reachable from the internet, only via Nginx.
+    networks: [backend]
+
+  # ---------- 2) Redis database ----------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # --appendonly yes = save every change to disk (data survives restarts).
+    command: ["redis-server", "--appendonly", "yes"]
+    # Store Redis data in a named volume. It survives 'docker compose down'.
+    volumes:
+      - redis-data:/data
+    # Docker asks Redis "ping" every 10 s; "PONG" = healthy.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [backend]
+
+  # ---------- 3) Nginx reverse proxy ----------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    # Publish port 80 of the server → port 80 of this container. The ONLY public port.
+    ports:
+      - "80:80"
+    # Use our config file instead of the default (":ro" = read-only).
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    # Start only after the web app is healthy (avoids "502 Bad Gateway" at startup).
+    depends_on:
+      web:
+        condition: service_healthy
+    networks: [backend]
+
+# Named volume for Redis data (managed by Docker).
+volumes:
+  redis-data:
+
+# Private network: containers find each other by service name (web, redis, nginx).
+networks:
+  backend:
