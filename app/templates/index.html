@@ -14,7 +14,6 @@
   <h1>🐳 Dockerized Web App</h1>
   <p>Flask + Redis + Nginx, deployed by a GitHub Actions CI/CD pipeline.</p>
   <div class="box">
-    <!-- {{ ... }} is filled in by Flask -->
     <p><b>Visits:</b> {{ visits if visits is not none else "Redis unavailable" }}</p>
     <p><b>Version:</b> {{ version }}</p>
     <p><b>Served by container:</b> {{ container }}</p>
