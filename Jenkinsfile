@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -27,22 +26,25 @@ pipeline {
         stage('Unit Tests') {
             steps {
                 dir('app') {
-                    sh '''
-                        set -e
+                    // CHANGE 1: dummy secret for tests only (not the real key)
+                    withEnv(['SECRET_KEY=test-only-not-a-real-secret']) {
+                        sh '''
+                            set -e
 
-                        python3 -m venv ../.venv
-                        . ../.venv/bin/activate
+                            python3 -m venv ../.venv
+                            . ../.venv/bin/activate
 
-                        python -m pip install --upgrade pip
+                            python -m pip install --upgrade pip
 
-                        python -m pip install \
-                            -r requirements.txt \
-                            -r requirements-dev.txt
+                            python -m pip install \
+                                -r requirements.txt \
+                                -r requirements-dev.txt
 
-                        python -c "import flask_wtf; print('Flask-WTF installed successfully')"
+                            python -c "import flask_wtf; print('Flask-WTF installed successfully')"
 
-                        python -m pytest -v --junitxml=../test-results.xml
-                    '''
+                            python -m pytest -v --junitxml=../test-results.xml
+                        '''
+                    }
                 }
             }
 
@@ -144,28 +146,40 @@ pipeline {
 
         stage('Deploy to App Server') {
             steps {
-                sshagent(credentials: ['app-server-ssh']) {
-                    sh '''
-                        set -e
+                // CHANGE 2: real secret comes from Jenkins credentials (never from the code)
+                withCredentials([
+                    string(credentialsId: 'flask-secret-key', variable: 'FLASK_SECRET_KEY')
+                ]) {
+                    sshagent(credentials: ['app-server-ssh']) {
+                        sh '''
+                            set -e
 
-                        SSH="ssh -o StrictHostKeyChecking=no"
-                        SCP="scp -o StrictHostKeyChecking=no"
+                            SSH="ssh -o StrictHostKeyChecking=no"
+                            SCP="scp -o StrictHostKeyChecking=no"
 
-                        $SSH ubuntu@${APP_SERVER} \
-                          "mkdir -p ~/app/nginx ~/app/app"
+                            $SSH ubuntu@${APP_SERVER} \
+                              "mkdir -p ~/app/nginx ~/app/app"
 
-                        $SCP docker-compose.yml \
-                          ubuntu@${APP_SERVER}:~/app/
+                            $SCP docker-compose.yml \
+                              ubuntu@${APP_SERVER}:~/app/
 
-                        $SCP -r app \
-                          ubuntu@${APP_SERVER}:~/app/
+                            $SCP -r app \
+                              ubuntu@${APP_SERVER}:~/app/
 
-                        $SCP nginx/default.conf \
-                          ubuntu@${APP_SERVER}:~/app/nginx/
+                            $SCP nginx/default.conf \
+                              ubuntu@${APP_SERVER}:~/app/nginx/
 
-                        $SSH ubuntu@${APP_SERVER} \
-                          "cd ~/app && export WEB_IMAGE=${IMAGE_NAME}:${IMAGE_TAG} && docker compose pull && docker compose up -d --no-build --remove-orphans"
-                    '''
+                            # Write a private .env file on the server (only the owner can read it).
+                            # The secret goes through stdin, so it never appears in a command line.
+                            {
+                              echo "SECRET_KEY=$FLASK_SECRET_KEY"
+                              echo "WEB_IMAGE=${IMAGE_NAME}:${IMAGE_TAG}"
+                            } | $SSH ubuntu@${APP_SERVER} "umask 077 && cat > ~/app/.env"
+
+                            $SSH ubuntu@${APP_SERVER} \
+                              "cd ~/app && docker compose pull && docker compose up -d --no-build --remove-orphans"
+                        '''
+                    }
                 }
             }
         }
