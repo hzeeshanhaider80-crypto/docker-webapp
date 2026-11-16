@@ -1,23 +1,41 @@
+
 """A small Flask web app that counts visits using Redis."""
+
 import os
 import socket
 
 import redis
 from flask import Flask, jsonify, render_template
+from flask_wtf.csrf import CSRFProtect
 
 app = Flask(__name__)
 
-# Settings come from environment variables (set in docker-compose.yml).
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")      # 'redis' = the Redis container's name
-APP_VERSION = os.getenv("APP_VERSION", "local")    # CI puts the git commit ID here
+# Load secret key securely from environment variables.
+secret_key = os.getenv("SECRET_KEY")
 
-# Connection to the Redis container. Short timeout so the page never hangs.
-cache = redis.Redis(host=REDIS_HOST, port=6379, socket_connect_timeout=2,
-                    decode_responses=True)
+if not secret_key:
+    raise RuntimeError("SECRET_KEY environment variable is required")
+
+app.config["SECRET_KEY"] = secret_key
+
+# Enable CSRF protection for state-changing requests.
+csrf = CSRFProtect(app)
+
+# Redis configuration
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+APP_VERSION = os.getenv("APP_VERSION", "local")
+
+# Redis connection
+cache = redis.Redis(
+    host=REDIS_HOST,
+    port=6379,
+    socket_connect_timeout=2,
+    decode_responses=True
+)
 
 
 def get_visits():
-    """Add 1 to the visit counter in Redis and return it (None if Redis is down)."""
+    """Increment visit counter and return its value."""
     try:
         return cache.incr("visits")
     except redis.exceptions.RedisError:
@@ -26,21 +44,22 @@ def get_visits():
 
 @app.route("/")
 def home():
-    # Render templates/index.html with these values.
     return render_template(
         "index.html",
         visits=get_visits(),
         version=APP_VERSION,
-        container=socket.gethostname(),   # inside Docker = the container ID
+        container=socket.gethostname(),
     )
 
 
 @app.route("/health")
 def health():
-    # Used by Docker, Nginx and the deploy script. Must NOT depend on Redis.
     return jsonify(status="ok")
 
 
 @app.route("/api/info")
 def info():
-    return jsonify(version=APP_VERSION, container=socket.gethostname())
+    return jsonify(
+        version=APP_VERSION,
+        container=socket.gethostname()
+    )
