@@ -28,16 +28,28 @@ pipeline {
             steps {
                 dir('app') {
                     sh '''
+                        set -e
+
                         python3 -m venv ../.venv
                         . ../.venv/bin/activate
-                        pip install -q -r requirements.txt -r requirements-dev.txt
-                        pytest -v --junitxml=../test-results.xml
+
+                        python -m pip install --upgrade pip
+
+                        python -m pip install \
+                            -r requirements.txt \
+                            -r requirements-dev.txt
+
+                        python -c "import flask_wtf; print('Flask-WTF installed successfully')"
+
+                        python -m pytest -v --junitxml=../test-results.xml
                     '''
                 }
             }
+
             post {
                 always {
-                    junit allowEmptyResults: true, testResults: 'test-results.xml'
+                    junit allowEmptyResults: true,
+                          testResults: 'test-results.xml'
                 }
             }
         }
@@ -46,6 +58,7 @@ pipeline {
             environment {
                 SCANNER_HOME = tool 'sonar-scanner'
             }
+
             steps {
                 withSonarQubeEnv('sonarqube') {
                     sh '''
@@ -115,6 +128,7 @@ pipeline {
                 ]) {
                     sh '''
                         set -e
+
                         echo "$DH_TOKEN" | docker login \
                           -u "$DH_USER" \
                           --password-stdin
